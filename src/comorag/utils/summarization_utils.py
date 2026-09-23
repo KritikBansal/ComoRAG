@@ -39,23 +39,25 @@ class GPT4SummarizationModel(BaseSummarizationModel):
         :return: Generated summary
         """
         try:
-            # Call OpenAI API interface to generate summary
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
+            # Call Gemini API interface to generate summary
+            request_params = {
+                "model": self.model,
+                "messages": [
                     {"role": "system", "content": "You are a helpful assistant."},
                     {
                         "role": "user",
                         "content": f"Write a summary of the following, including as many key details as possible: {context}",
-                    },
+                     },
                 ],
-                max_completion_tokens=max_completion_tokens,
-                stop=stop_sequence,
-                temperature=0,
-                frequency_penalty=0,
-                presence_penalty=0,
-                top_p=1,
-            )
+                "max_completion_tokens": max_completion_tokens,
+                "temperature": 0,
+                "top_p": 1,
+            }
+
+            if stop_sequence is not None:
+                request_params["stop"] = stop_sequence
+
+            response = self.client.chat.completions.create(**request_params)
 
             # Return generated summary
             return response.choices[0].message.content

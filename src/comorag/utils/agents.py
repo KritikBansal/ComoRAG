@@ -31,16 +31,18 @@ class BaseAgent(ABC):
     @retry(wait=wait_random_exponential(min=1, max=20), stop=stop_after_attempt(6))
     def _call_llm(self, messages, max_completion_tokens=500, stop_sequence=None, temperature=0, top_p=1):
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                max_tokens=max_completion_tokens,
-                stop=stop_sequence,
-                temperature=temperature,
-                top_p=top_p,
-                frequency_penalty=0,
-                presence_penalty=0,
-            )
+            request_params = {
+                "model": self.model,
+                "messages": messages,
+                "max_tokens": max_completion_tokens,
+                "temperature": temperature,
+                "top_p": top_p,
+            }
+
+            if stop_sequence is not None:
+                request_params["stop"] = stop_sequence
+
+            response = self.client.chat.completions.create(**request_params)
             return response.choices[0].message.content
         except Exception as e:
             logging.error(f"LLM call failed: {e}")

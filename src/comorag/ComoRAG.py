@@ -27,7 +27,7 @@ from .llm import _get_llm_class, BaseLLM
 from .embedding_model import _get_embedding_model_class, BaseEmbeddingModel
 from .embedding_store import EmbeddingStore
 from .information_extraction import OpenIE
-from .information_extraction.openie_vllm_offline import VLLMOfflineOpenIE
+# from .information_extraction.openie_vllm_offline import VLLMOfflineOpenIE
 from .prompts.linking import get_query_instruction
 from .prompts.prompt_template_manager import PromptTemplateManager
 from .rerank import DSPyFilter
@@ -81,7 +81,9 @@ class ComoRAG:
 
         if self.global_config.openie_mode == 'online':
             self.openie = OpenIE(llm_model=self.llm_model)
+
         elif self.global_config.openie_mode == 'offline':
+            from .information_extraction.openie_vllm_offline import VLLMOfflineOpenIE
             self.openie = VLLMOfflineOpenIE(self.global_config)
 
         self.graph = self.initialize_graph()
@@ -448,12 +450,17 @@ class ComoRAG:
 
         return q_idx, query_solution, step_answers_local
     def try_answer(self, queries: List[str], retrieval_queries: List[str] = None, num_to_retrieve: int = None) -> List[QuerySolution]:
+        if retrieval_queries is None:
+            retrieval_queries = queries
+        if len(queries) != len(retrieval_queries):
+            raise ValueError(
+                "queries and retrieval_queries must contain the same number of items"
+            )    
         queries_solutions = []
         step_answers = {}
         self.level_store = self.timeline_summarizer.get_level_embedding_store(0)
         max_workers = min(16, len(queries)) 
-        if retrieval_queries is None:
-           retrieval_queries = queries
+        
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_query = {
                 executor.submit(self.meta_control_loop, q_idx, query, retrieval_queries[q_idx]): q_idx 
@@ -961,8 +968,8 @@ class ComoRAG:
             query_embedding = self.embedding_model.batch_encode(query,
                                                                 instruction=get_query_instruction('query_to_fact'),
                                                                 norm=True)
-        query_fact_scores = np.dot(self.fact_embeddings, query_embedding.T) # shape: (#facts, )
-        query_fact_scores = np.squeeze(query_fact_scores) if query_fact_scores.ndim == 2 else query_fact_scores
+        query_fact_scores = np.dot(self.fact_embeddings, query_embedding.T)
+        query_fact_scores = np.asarray(query_fact_scores).reshape(-1)
         query_fact_scores = min_max_normalize(query_fact_scores)
 
         return query_fact_scores
@@ -973,17 +980,19 @@ class ComoRAG:
             query_embedding = self.embedding_model.batch_encode(query,
                                                                 instruction=get_query_instruction('query_to_passage'),
                                                                 norm=True)
-      
         if need_cluster:
             query_doc_scores = np.dot(self.summary_embeddings, query_embedding.T)
         else:
             query_doc_scores = np.dot(self.passage_embeddings, query_embedding.T)
 
-        query_doc_scores = np.squeeze(query_doc_scores) if query_doc_scores.ndim == 2 else query_doc_scores
+        # Always keep retrieval scores as a 1-D array.
+        # This also handles the single-summary case correctly.
+        query_doc_scores = np.asarray(query_doc_scores).reshape(-1)
         query_doc_scores = min_max_normalize(query_doc_scores)
 
         sorted_doc_ids = np.argsort(query_doc_scores)[::-1]
-        sorted_doc_scores = query_doc_scores[sorted_doc_ids.tolist()]
+        sorted_doc_scores = query_doc_scores[sorted_doc_ids]
+
         return sorted_doc_ids, sorted_doc_scores
 
 
