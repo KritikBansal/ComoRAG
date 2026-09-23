@@ -154,9 +154,26 @@ class ComoRAG:
         self.max_tokens_ver = self.global_config.max_tokens_ver
         self.max_tokens_sem = self.global_config.max_tokens_sem
         self.max_tokens_epi = self.global_config.max_tokens_epi
+        self.max_tokens_hist = self.global_config.max_tokens_hist
         self.level_store = self.timeline_summarizer.get_level_embedding_store(0)
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.global_config.embedding_model_name)
+
+    def truncate_to_tokens(self, text, max_tokens):
+            token_ids = self.tokenizer.encode(
+                text,
+                add_special_tokens=False
+            )
+    
+            if len(token_ids) <= max_tokens:
+                return text
+    
+            token_ids = token_ids[:max_tokens]
+    
+            return self.tokenizer.decode(
+                token_ids,
+                skip_special_tokens=True
+            )
         
     def initialize_graph(self):
         self._graphml_xml_file = os.path.join(
@@ -358,6 +375,7 @@ class ComoRAG:
                     memory_pool = self.mem_encode(query= retrieve_query+" "+probe, docs=docs, memory_pool=memory_pool, probe=probe)
                 # mem-fusion
                 historical_infomation = memory_pool.create_fusion_content(probe=retrieve_query,top_k_percent=0.5)
+                historical_infomation = self.truncate_to_tokens(historical_infomation,self.max_tokens_hist)
                 memory_pool.add_fused_node(probe=retrieve_query, fused_content=historical_infomation, source_nodes=nodes)
                 
                 sem_context = "\n".join([node.cue for node in memory_pool.get_temp_nodes_by_type(NodeType.SEM)])
