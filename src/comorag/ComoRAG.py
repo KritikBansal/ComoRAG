@@ -368,7 +368,7 @@ class ComoRAG:
                 memory_pool.merge_temp_to_main()
                 # self-probe
                 previous_probes = "\n".join(memory_pool.get_all_probes())
-                probes = probe_agent.find_probes(query=retrieve_query, context=prompt_user, previous_probes=previous_probes)
+                probes = probe_agent.find_probes(query=retrieve_query, context=prompt_user, previous_probes=previous_probes)[:3]
                 step_info["probes"] = probes
                 for probe in probes:
                     docs,nodes = self.tri_retrieve(query = probe, memory_pool=memory_pool)
