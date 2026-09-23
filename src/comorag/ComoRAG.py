@@ -279,13 +279,13 @@ class ComoRAG:
             self.augment_graph()
             self.save_igraph()
 
-    def meta_control_loop(self, q_idx, query):
+    def meta_control_loop(self, q_idx, query, retrieval_query=None):
         """process single query"""
         # extract query for retrieval (without options)
-        if self.global_config.is_mc:
-            retrieve_query = query
-        else:
-            retrieve_query = query
+        if retrieval_query is None:
+            retrieval_query = query
+        retrieve_query = retrieval_query
+
         pool_agent = agents.PoolAgent(
             model=self.global_config.llm_name,
             llm_base_url=self.global_config.llm_base_url,
@@ -447,14 +447,16 @@ class ComoRAG:
                 f.write("="*50 + "\n\n")
 
         return q_idx, query_solution, step_answers_local
-    def try_answer(self, queries: List[str], num_to_retrieve: int = None) -> List[QuerySolution]:
+    def try_answer(self, queries: List[str], retrieval_queries: List[str] = None, num_to_retrieve: int = None) -> List[QuerySolution]:
         queries_solutions = []
         step_answers = {}
         self.level_store = self.timeline_summarizer.get_level_embedding_store(0)
         max_workers = min(16, len(queries)) 
+        if retrieval_queries is None:
+           retrieval_queries = queries
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_query = {
-                executor.submit(self.meta_control_loop, q_idx, query): q_idx 
+                executor.submit(self.meta_control_loop, q_idx, query, retrieval_queries[q_idx]): q_idx 
                 for q_idx, query in enumerate(queries)
             }
 
