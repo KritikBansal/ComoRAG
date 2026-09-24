@@ -155,7 +155,19 @@ class CacheOpenAI(BaseLLM):
 
         config_dict['llm_name'] = self.global_config.llm_name
         config_dict['llm_base_url'] = self.global_config.llm_base_url
-        config_dict['generate_params'] = {
+
+        is_gemini = self.global_config.llm_name.lower().startswith("gemini")
+
+        if is_gemini:
+            # Gemini OpenAI-compatible API:
+            # use only the parameters that we have verified work.
+            config_dict['generate_params'] = {
+                "model": self.global_config.llm_name,
+                "max_completion_tokens": config_dict.get("max_new_tokens", 400),
+                "temperature": config_dict.get("temperature", 0.0),
+            }
+        else:
+            config_dict['generate_params'] = {
                 "model": self.global_config.llm_name,
                 "max_completion_tokens": config_dict.get("max_new_tokens", 400),
                 "n": config_dict.get("num_gen_choices", 1),
@@ -179,8 +191,12 @@ class CacheOpenAI(BaseLLM):
         params["messages"] = messages
         
 
-        if 'gpt' not in params['model'] or version.parse(openai.__version__) < version.parse("1.45.0"): # if we use vllm to call openai api or if we use openai but the version is too old to use 'max_completion_tokens' argument
-            # TODO strange version change in openai protocol, but our current vllm version not changed yet
+        model_name = params['model'].lower()
+
+        if (
+            ('gpt' not in model_name and 'gemini' not in model_name)
+            or version.parse(openai.__version__) < version.parse("1.45.0")
+        ):
             params['max_tokens'] = params.pop('max_completion_tokens')
 
         response = self.openai_client.chat.completions.create(**params)

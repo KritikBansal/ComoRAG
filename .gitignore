@@ -90,3 +90,12 @@ Thumbs.db
 *.swp
 *.bak
 *.tmp 
+
+#added by Kritik
+.env
+.venv/
+__pycache__/
+*.pyc
+dataset/infinitebench/
+outputs/
+result/**/details/

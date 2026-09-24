@@ -250,6 +250,11 @@ class BaseConfig:
         default=1000,
         metadata={"help": "Max tokens for the timeline of the documents in the QA process."}
     )
+    max_tokens_hist: int = field(
+        default=462,
+        metadata={"help": "Max tokens for historical fused memory."}
+    )
+    
     # record the number of steps in the QA process
     record_steps: bool = field(
         default=False,

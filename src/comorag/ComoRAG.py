@@ -27,7 +27,7 @@ from .llm import _get_llm_class, BaseLLM
 from .embedding_model import _get_embedding_model_class, BaseEmbeddingModel
 from .embedding_store import EmbeddingStore
 from .information_extraction import OpenIE
-from .information_extraction.openie_vllm_offline import VLLMOfflineOpenIE
+# from .information_extraction.openie_vllm_offline import VLLMOfflineOpenIE
 from .prompts.linking import get_query_instruction
 from .prompts.prompt_template_manager import PromptTemplateManager
 from .rerank import DSPyFilter
@@ -81,7 +81,9 @@ class ComoRAG:
 
         if self.global_config.openie_mode == 'online':
             self.openie = OpenIE(llm_model=self.llm_model)
+
         elif self.global_config.openie_mode == 'offline':
+            from .information_extraction.openie_vllm_offline import VLLMOfflineOpenIE
             self.openie = VLLMOfflineOpenIE(self.global_config)
 
         self.graph = self.initialize_graph()
@@ -154,9 +156,26 @@ class ComoRAG:
         self.max_tokens_ver = self.global_config.max_tokens_ver
         self.max_tokens_sem = self.global_config.max_tokens_sem
         self.max_tokens_epi = self.global_config.max_tokens_epi
+        self.max_tokens_hist = self.global_config.max_tokens_hist
         self.level_store = self.timeline_summarizer.get_level_embedding_store(0)
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.global_config.embedding_model_name)
+
+    def truncate_to_tokens(self, text, max_tokens):
+            token_ids = self.tokenizer.encode(
+                text,
+                add_special_tokens=False
+            )
+    
+            if len(token_ids) <= max_tokens:
+                return text
+    
+            token_ids = token_ids[:max_tokens]
+    
+            return self.tokenizer.decode(
+                token_ids,
+                skip_special_tokens=True
+            )
         
     def initialize_graph(self):
         self._graphml_xml_file = os.path.join(
@@ -262,13 +281,13 @@ class ComoRAG:
             self.augment_graph()
             self.save_igraph()
 
-    def meta_control_loop(self, q_idx, query):
+    def meta_control_loop(self, q_idx, query, retrieval_query=None):
         """process single query"""
         # extract query for retrieval (without options)
-        if self.global_config.is_mc:
-            retrieve_query = query
-        else:
-            retrieve_query = query
+        if retrieval_query is None:
+            retrieval_query = query
+        retrieve_query = retrieval_query
+
         pool_agent = agents.PoolAgent(
             model=self.global_config.llm_name,
             llm_base_url=self.global_config.llm_base_url,
@@ -351,13 +370,14 @@ class ComoRAG:
                 memory_pool.merge_temp_to_main()
                 # self-probe
                 previous_probes = "\n".join(memory_pool.get_all_probes())
-                probes = probe_agent.find_probes(query=retrieve_query, context=prompt_user, previous_probes=previous_probes)
+                probes = probe_agent.find_probes(query=retrieve_query, context=prompt_user, previous_probes=previous_probes)[:3]
                 step_info["probes"] = probes
                 for probe in probes:
                     docs,nodes = self.tri_retrieve(query = probe, memory_pool=memory_pool)
                     memory_pool = self.mem_encode(query= retrieve_query+" "+probe, docs=docs, memory_pool=memory_pool, probe=probe)
                 # mem-fusion
                 historical_infomation = memory_pool.create_fusion_content(probe=retrieve_query,top_k_percent=0.5)
+                historical_infomation = self.truncate_to_tokens(historical_infomation,self.max_tokens_hist)
                 memory_pool.add_fused_node(probe=retrieve_query, fused_content=historical_infomation, source_nodes=nodes)
                 
                 sem_context = "\n".join([node.cue for node in memory_pool.get_temp_nodes_by_type(NodeType.SEM)])
@@ -429,14 +449,21 @@ class ComoRAG:
                 f.write("="*50 + "\n\n")
 
         return q_idx, query_solution, step_answers_local
-    def try_answer(self, queries: List[str], num_to_retrieve: int = None) -> List[QuerySolution]:
+    def try_answer(self, queries: List[str], retrieval_queries: List[str] = None, num_to_retrieve: int = None) -> List[QuerySolution]:
+        if retrieval_queries is None:
+            retrieval_queries = queries
+        if len(queries) != len(retrieval_queries):
+            raise ValueError(
+                "queries and retrieval_queries must contain the same number of items"
+            )    
         queries_solutions = []
         step_answers = {}
         self.level_store = self.timeline_summarizer.get_level_embedding_store(0)
         max_workers = min(16, len(queries)) 
+        
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_query = {
-                executor.submit(self.meta_control_loop, q_idx, query): q_idx 
+                executor.submit(self.meta_control_loop, q_idx, query, retrieval_queries[q_idx]): q_idx 
                 for q_idx, query in enumerate(queries)
             }
 
@@ -941,8 +968,8 @@ class ComoRAG:
             query_embedding = self.embedding_model.batch_encode(query,
                                                                 instruction=get_query_instruction('query_to_fact'),
                                                                 norm=True)
-        query_fact_scores = np.dot(self.fact_embeddings, query_embedding.T) # shape: (#facts, )
-        query_fact_scores = np.squeeze(query_fact_scores) if query_fact_scores.ndim == 2 else query_fact_scores
+        query_fact_scores = np.dot(self.fact_embeddings, query_embedding.T)
+        query_fact_scores = np.asarray(query_fact_scores).reshape(-1)
         query_fact_scores = min_max_normalize(query_fact_scores)
 
         return query_fact_scores
@@ -953,17 +980,19 @@ class ComoRAG:
             query_embedding = self.embedding_model.batch_encode(query,
                                                                 instruction=get_query_instruction('query_to_passage'),
                                                                 norm=True)
-      
         if need_cluster:
             query_doc_scores = np.dot(self.summary_embeddings, query_embedding.T)
         else:
             query_doc_scores = np.dot(self.passage_embeddings, query_embedding.T)
 
-        query_doc_scores = np.squeeze(query_doc_scores) if query_doc_scores.ndim == 2 else query_doc_scores
+        # Always keep retrieval scores as a 1-D array.
+        # This also handles the single-summary case correctly.
+        query_doc_scores = np.asarray(query_doc_scores).reshape(-1)
         query_doc_scores = min_max_normalize(query_doc_scores)
 
         sorted_doc_ids = np.argsort(query_doc_scores)[::-1]
-        sorted_doc_scores = query_doc_scores[sorted_doc_ids.tolist()]
+        sorted_doc_scores = query_doc_scores[sorted_doc_ids]
+
         return sorted_doc_ids, sorted_doc_scores
 
 
