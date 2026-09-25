@@ -1,6 +1,7 @@
 import functools
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 from copy import deepcopy
@@ -21,6 +22,7 @@ from ..utils.llm_utils import (
 
 from .base import BaseLLM, LLMConfig
 
+logger = logging.getLogger(__name__)
 
 
 def cache_response(func):
@@ -104,7 +106,7 @@ def cache_response(func):
 def dynamic_retry_decorator(func):
     @functools.wraps(func)
     def wrapper(self, *args, **kwargs):
-        max_retries = getattr(self, "max_retries", 5)  
+        max_retries = getattr(self, "max_retries", 5)
         dynamic_retry = retry(stop=stop_after_attempt(max_retries), wait=wait_fixed(1))
         decorated_func = dynamic_retry(func)
         return decorated_func(self, *args, **kwargs)
@@ -176,7 +178,7 @@ class CacheOpenAI(BaseLLM):
             }
 
         self.llm_config = LLMConfig.from_dict(config_dict=config_dict)
-        
+
 
     @cache_response
     @dynamic_retry_decorator
@@ -189,7 +191,7 @@ class CacheOpenAI(BaseLLM):
         if kwargs:
             params.update(kwargs)
         params["messages"] = messages
-        
+
 
         model_name = params['model'].lower()
 
@@ -199,17 +201,190 @@ class CacheOpenAI(BaseLLM):
         ):
             params['max_tokens'] = params.pop('max_completion_tokens')
 
-        response = self.openai_client.chat.completions.create(**params)
+        response = self.openai_client.chat.completions.create(
+            **params
+        )
 
-        response_message = response.choices[0].message.content
-        assert isinstance(response_message, str), "response_message should be a string"
-        
+        # --------------------------------------------------------
+        # Validate Gemini's OpenAI-compatible response.
+        #
+        # HTTP 200 does not guarantee that Gemini returned usable
+        # text. Content filters may return a choice with no message.
+        # --------------------------------------------------------
+
+        choices = getattr(
+            response,
+            "choices",
+            None,
+        )
+
+        if not choices:
+            raise RuntimeError(
+                "Gemini returned no choices."
+            )
+
+        choice = choices[0]
+
+        if choice is None:
+            raise RuntimeError(
+                "Gemini returned choices[0]=None."
+            )
+
+        finish_reason = str(
+            getattr(
+                choice,
+                "finish_reason",
+                "",
+            )
+        )
+
+        finish_reason_upper = (
+            finish_reason.upper()
+        )
+
+    # --------------------------------------------------------
+    # Deterministic/content-policy blocks
+    #
+    # These should NOT repeatedly crash/retry the experiment.
+    # They represent a model/API outcome.
+    #
+    # <NO_OUTPUT> deliberately contains no A/B/C/D answer.
+    # Therefore an MC evaluator should count it as incorrect
+    # rather than accidentally treating it as a valid choice.
+    # --------------------------------------------------------
+
+        blocked_reasons = (
+            "PROHIBITED_CONTENT",
+            "SAFETY",
+            "BLOCKLIST",
+            "SPII",
+            "RECITATION",
+        )
+
+        is_blocked = any(
+            reason in finish_reason_upper
+            for reason in blocked_reasons
+        )
+
+        usage = getattr(
+            response,
+            "usage",
+            None,
+        )
+
+        prompt_tokens = (
+            getattr(
+                usage,
+                "prompt_tokens",
+                0,
+            )
+            if usage is not None
+            else 0
+        )
+
+        completion_tokens = (
+            getattr(
+                usage,
+                "completion_tokens",
+                0,
+            )
+            if usage is not None
+            else 0
+        )
+
+        if is_blocked:
+            logger.warning(
+                "Gemini generation blocked. "
+                f"finish_reason={finish_reason}. "
+                "Recording <NO_OUTPUT>."
+            )
+
+            response_message = (
+                "### Final Answer\n"
+                "<NO_OUTPUT>"
+            )
+
+            metadata = {
+                "prompt_tokens": (
+                    prompt_tokens
+                ),
+                "completion_tokens": (
+                    completion_tokens
+                ),
+                "finish_reason": (
+                    finish_reason
+                ),
+                "blocked": True,
+            }
+
+            return (
+                response_message,
+                metadata
+            )
+
+    # --------------------------------------------------------
+    # Other missing-message cases may be transient.
+    # Raise so the existing Tenacity wrapper retries them.
+    # --------------------------------------------------------
+
+        message = getattr(
+            choice,
+            "message",
+            None,
+        )
+
+        if message is None:
+            raise RuntimeError(
+                "Gemini returned no message. "
+                f"finish_reason={finish_reason}"
+            )
+
+        response_message = getattr(
+            message,
+            "content",
+            None,
+        )
+
+        if response_message is None:
+            raise RuntimeError(
+                "Gemini returned content=None. "
+                f"finish_reason={finish_reason}"
+            )
+
+        if not isinstance(
+            response_message,
+            str,
+        ):
+            raise RuntimeError(
+                "Gemini returned non-string content. "
+                f"type={type(response_message).__name__}, "
+                f"finish_reason={finish_reason}"
+            )
+
+        response_message = (
+            response_message.strip()
+        )
+
+        if not response_message:
+            raise RuntimeError(
+                "Gemini returned empty content. "
+                f"finish_reason={finish_reason}"
+            )
+
         metadata = {
-            "prompt_tokens": response.usage.prompt_tokens, 
-            "completion_tokens": response.usage.completion_tokens,
-            "finish_reason": response.choices[0].finish_reason,
+            "prompt_tokens": (
+                prompt_tokens
+            ),
+            "completion_tokens": (
+                completion_tokens
+            ),
+            "finish_reason": (
+                finish_reason
+            ),
+            "blocked": False,
         }
 
-        return response_message, metadata
-
-
+        return (
+            response_message,
+            metadata,
+        )

@@ -1,0 +1,14 @@
+{
+  "total": 99,
+  "official_correct": 31,
+  "official_accuracy": 0.31313131313131315,
+  "strict_correct": 30,
+  "strict_accuracy": 0.30303030303030304,
+  "strict_valid_choices": 39,
+  "strict_choice_rate": 0.3939393939393939,
+  "no_output_count": 2,
+  "official_correct_but_not_strict": 1,
+  "official_only_indices": [
+    5
+  ]
+}

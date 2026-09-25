@@ -1044,24 +1044,24 @@ def run_task(
             rebuild_index=rebuild_index
         )
 
-        actually_run_context_ids = [
-            context_dir.name
-            for context_dir in context_dirs
-        ]
+    actually_run_context_ids = [
+        context_dir.name
+        for context_dir in context_dirs
+    ]
 
         # Do not enforce the full expected question count during
         # an intentional --limit-contexts pilot.
-        validation_target = (
-            expected_questions
-            if limit_contexts is None
-            else None
-)
+    validation_target = (
+        expected_questions
+        if limit_contexts is None
+        else None
+    )
 
-        aggregate_task_results(
-            task_name=task_name,
-            selected_context_ids=actually_run_context_ids,
-            expected_questions=validation_target,
-)
+    aggregate_task_results(
+        task_name=task_name,
+        selected_context_ids=actually_run_context_ids,
+        expected_questions=validation_target,
+    )
 
 
 # ============================================================

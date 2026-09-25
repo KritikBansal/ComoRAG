@@ -1,0 +1,4 @@
+torch_version: 2.14.0+cpu
+cuda_available: False
+torch_cuda_version: None
+gpu: none / CPU execution

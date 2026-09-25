@@ -1,0 +1,14 @@
+MODEL_NAME = gemini-3.1-flash-lite
+GEMINI_BASE_URL = https://generativelanguage.googleapis.com/v1beta/openai/
+EMBEDDING_MODEL = BAAI/bge-m3
+openie_mode = online
+embedding_model_name = BAAI/bge-m3
+embedding_batch_size = 32
+need_cluster = True
+seed = 0
+temperature = 0
+max_meta_loop_max_iterations = 5
+max_tokens_ver = 3692
+max_tokens_sem = 923
+max_tokens_epi = 923
+max_tokens_hist = 462

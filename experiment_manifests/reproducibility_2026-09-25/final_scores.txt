@@ -1,0 +1,29 @@
+Experiment:
+ComoRAG + Gemini 3.1 Flash-Lite
+InfiniteBench fixed budget-constrained subset
+
+EN.QA
+Questions: 143
+Contexts: 28
+Exact Match: 0.1678 (16.78%)
+F1: 0.2446 (24.46%)
+
+EN.MC
+Questions: 99
+Contexts: 25
+Official InfiniteBench correct: 31/99
+Official InfiniteBench accuracy: 31.31%
+Strict explicit-choice correct: 30/99
+Strict explicit-choice accuracy: 30.30%
+Explicit-choice responses: 39/99 (39.39%)
+Final genuine NO_OUTPUT responses: 2/99
+
+Published ComoRAG + GPT-4o-mini full-benchmark reference:
+EN.QA F1: 34.52
+EN.QA EM: 25.07
+EN.MC Accuracy: 72.93
+
+Important:
+The published results use the complete InfiniteBench tasks.
+The Gemini results use a frozen budget-constrained subset.
+Differences are descriptive and are not controlled backbone-effect estimates.
