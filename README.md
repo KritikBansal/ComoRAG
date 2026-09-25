@@ -1,24 +1,418 @@
-<h1 align="center">ComoRAG: A Cognitive-Inspired Memory-Organized RAG for Stateful Long Narrative Reasoning</h1>
-<div align="center">
+# ComoRAG × Gemini 3.1 Flash-Lite
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/) [![CUDA](https://img.shields.io/badge/CUDA-12.x-green)](https://developer.nvidia.com/cuda-zone) [![Platform](https://img.shields.io/badge/Platform-Linux-lightgrey)](https://kernel.org/) [![RAG](https://img.shields.io/badge/RAG-Graph%20Memory-orange)](#project-introduction) [![LLM](https://img.shields.io/badge/LLM-OpenAI%2FvLLM-purple)](#main-modules) [![Status](https://img.shields.io/badge/Status-Active-success)](#) [![arXiv](https://img.shields.io/badge/arXiv-2508.10419-b31b1b.svg)](https://arxiv.org/abs/2508.10419) [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![DeepWiki](https://img.shields.io/badge/DeepWiki-ComoRAG-purple)](https://deepwiki.com/EternityJune25/ComoRAG)
+**An end-to-end Gemini adaptation of ComoRAG for InfiniteBench EN.QA and EN.MC**
 
-[English](README.md) | [中文](README_zh.md)
+> This repository is a research fork/adaptation of the official [ComoRAG](https://github.com/EternityJune25/ComoRAG) implementation accompanying the paper [*ComoRAG: A Cognitive-Inspired Memory-Organized RAG for Stateful Long Narrative Reasoning*](https://arxiv.org/abs/2508.10419).  
+> It is **not** the official ComoRAG repository.
 
-</div>
-
-<p align="center">
-  <img src="assert/img/overview.png" alt="ComoRAG Overview" width="100%">
-</p>
-
-## 📖 Paper Information
-
-This is the **official implementation** of the paper:
-
-**[ComoRAG: A Cognitive-Inspired Memory-Organized RAG for Stateful Long Narrative Reasoning](https://arxiv.org/abs/2508.10419)**
+Basic pipeline:
+<img width="1122" height="1402" alt="ChatGPT Image Sep 25, 2026, 06_05_49 PM" src="https://github.com/user-attachments/assets/c893de51-f4f9-427e-9f36-44fafd2d94d4" />
 
 
-**Citation:**
+The main experiment lives on the branch:
+
+```text
+experiment/gemini31-infinitebench
+```
+
+This branch replaces the original GPT-4o-mini backbone with **Gemini 3.1 Flash-Lite**, adapts the code for the Gemini OpenAI-compatible API and native Windows execution, and evaluates the resulting end-to-end system on a frozen budget-constrained subset of **InfiniteBench EN.QA** and **EN.MC**.
+
+---
+
+## Research question
+
+> **How does an end-to-end Gemini 3.1 Flash-Lite implementation of ComoRAG perform on InfiniteBench EN.QA and EN.MC relative to the published GPT-4o-mini ComoRAG results?**
+
+This is intentionally treated as a **replication/extension**, not as a perfectly controlled backbone swap. In ComoRAG, the LLM is used not only for final answering but also for model-dependent intermediate stages such as summarization and OpenIE. Replacing the LLM therefore changes parts of the indexing pipeline as well as the final reasoning stage.
+
+---
+
+## Main changes in this branch
+
+Compared with the upstream implementation, this branch adds or modifies:
+
+- **Gemini 3.1 Flash-Lite** through Google's OpenAI-compatible endpoint.
+- **BAAI/bge-m3** embeddings.
+- Native **Windows / Git Bash** compatibility.
+- Platform markers for Linux-only dependencies such as `vllm`, `triton`, NCCL, and `uvloop`.
+- A **6,000-token reconstructed V:S:E:H evidence budget** using the paper's `8:2:2:1` ratio.
+- Historical-memory token budgeting.
+- Separate **retrieval queries** and **final QA queries** for EN.MC so that answer options are hidden during retrieval but shown to the final answering stage.
+- Shared index reuse between EN.QA and EN.MC when the underlying context is identical.
+- Index-completion markers and artifact validation for safer resume behavior.
+- Robust handling of singleton retrieval/normalization cases.
+- Gemini response validation for missing messages/content and content-filter responses.
+- Timeline summarization robustness, including deterministic extractive fallback for Gemini `PROHIBITED_CONTENT` windows.
+- A deterministic, budget-aware InfiniteBench subset-selection workflow.
+- EN.MC evaluation using both the official InfiniteBench-style scorer and a stricter explicit-choice audit.
+- Recovery scripts documenting and correcting a detected EN.MC implementation bug before final evaluation.
+
+---
+
+## Experimental configuration
+
+The frozen experiment uses:
+
+| Setting | Value |
+|---|---|
+| LLM | `gemini-3.1-flash-lite` |
+| API | Gemini OpenAI-compatible endpoint |
+| Embedding model | `BAAI/bge-m3` |
+| OpenIE | Online / API-based |
+| Chunk size | 512 tokens |
+| Embedding batch size | 32 |
+| Semantic clustering | Enabled |
+| Temperature | 0 |
+| Experiment seed | 0 |
+| Maximum metacognitive iterations | 5 |
+| Maximum probing queries | 3 |
+| Veridical budget | 3692 tokens |
+| Semantic budget | 923 tokens |
+| Episodic budget | 923 tokens |
+| Historical budget | 462 tokens |
+| Total QA evidence budget | 6000 tokens |
+| V:S:E:H allocation | 8:2:2:1 |
+
+The exact frozen configuration is stored in:
+
+```text
+experiment_manifests/reproducibility_2026-09-25/experiment_config.txt
+```
+
+### Seed note
+
+The experiment configuration records seed `0` for reproducibility. The Gemini OpenAI-compatible API path used here does not send the unsupported `seed` parameter to Gemini, so this should not be interpreted as deterministic Gemini sampling at the API level.
+
+---
+
+## Frozen InfiniteBench subset
+
+Running the full benchmark end-to-end was cost-prohibitive for this seminar experiment, so a fixed subset was selected **before final evaluation** using a deterministic budget-constrained procedure.
+
+The selection prioritizes:
+
+- reuse of already-indexed contexts,
+- contexts shared between EN.QA and EN.MC,
+- representation across small, medium, and large documents,
+- a fixed random seed,
+- a fixed API-budget ceiling.
+
+Final frozen subset:
+
+| Task | Contexts | Questions |
+|---|---:|---:|
+| EN.QA | 28 | 143 |
+| EN.MC | 25 | 99 |
+
+Frozen manifest:
+
+```text
+experiment_manifests/infinitebench_subset_seed0.json
+```
+
+Manifest SHA-256:
+
+```text
+ae7642814f94d51facbe9523f92672732dbba685ee67399c44d80aca70b72631
+```
+
+The selection script is available at:
+
+```text
+scripts/select_infinitebench_subset.py
+```
+
+For reproducing the reported experiment, use the **committed frozen manifest** rather than generating a new subset.
+
+---
+
+## Results
+
+### Final Gemini 3.1 Flash-Lite + ComoRAG results
+
+| Task | Metric | Result |
+|---|---|---:|
+| EN.QA | Exact Match | **16.78%** |
+| EN.QA | F1 | **24.46%** |
+| EN.MC | Official InfiniteBench Accuracy | **31.31%** (31/99) |
+| EN.MC | Strict explicit-choice Accuracy | **30.30%** (30/99) |
+| EN.MC | Explicit-choice rate | **39.39%** (39/99) |
+| EN.MC | Final genuine `<NO_OUTPUT>` responses | **2.02%** (2/99) |
+
+Machine-readable summaries:
+
+```text
+evaluation_results/enqa_subset/evaluation_summary.json
+evaluation_results/enmc_subset/evaluation_summary.json
+```
+
+### Published ComoRAG reference
+
+The original ComoRAG paper reports the following full-benchmark results with GPT-4o-mini:
+
+| Task | Metric | Published ComoRAG + GPT-4o-mini |
+|---|---|---:|
+| EN.QA | F1 | 34.52 |
+| EN.QA | Exact Match | 25.07 |
+| EN.MC | Accuracy | 72.93 |
+
+These numbers are included only as a **descriptive reference**. The original paper evaluates the complete InfiniteBench tasks, while this experiment evaluates the frozen budget-constrained subset above. The differences therefore must **not** be interpreted as controlled estimates of the effect of replacing GPT-4o-mini with Gemini 3.1 Flash-Lite.
+
+---
+
+## EN.MC diagnostic observation
+
+The final official EN.MC accuracy is **31.31%**. Only 39 of the 99 responses contained an explicit A/B/C/D choice.
+
+Among those 39 explicit-choice responses, 30 were correct:
+
+```text
+30 / 39 = 76.92%
+```
+
+This value is **diagnostic only** and is not a benchmark accuracy measure, because the 39 cases are a self-selected subset in which the model chose to commit to an option.
+
+The official InfiniteBench-style scorer and the stricter explicit-choice audit differ by only one correct prediction (31 vs. 30), so permissive answer extraction is not the primary explanation for the low aggregate EN.MC score.
+
+---
+
+## Evaluation integrity and EN.MC recovery
+
+During validation, an indentation error in the Gemini response-handling patch was detected. It incorrectly converted normal `finish_reason=STOP` responses into `<NO_OUTPUT>`.
+
+The issue affected **54 final EN.MC predictions**. The recovery procedure was deliberately restricted to those affected questions:
+
+1. identify the 54 affected final predictions,
+2. remove only invalid `STOP + <NO_OUTPUT>` cache entries,
+3. preserve genuine content-filter responses,
+4. rerun only the affected 54 questions,
+5. validate all 54 recovered outputs,
+6. merge them into the frozen 99-question EN.MC result,
+7. recompute the final evaluation.
+
+The final reported **31.31%** EN.MC accuracy is the **post-recovery** result. The earlier pre-recovery evaluation is not a valid experimental result.
+
+Relevant recovery files:
+
+```text
+experiment_manifests/enmc_stop_bug_recovery.json
+scripts/find_bad_enmc_stop_outputs.py
+scripts/remove_bad_stop_cache.py
+scripts/recover_enmc_stop_bug.py
+scripts/apply_enmc_stop_bug_recovery.py
+```
+
+---
+
+## Installation
+
+### 1. Clone the repository and switch to the experiment branch
+
+```bash
+git clone https://github.com/KritikBansal/ComoRAG.git
+cd ComoRAG
+git checkout experiment/gemini31-infinitebench
+```
+
+### 2. Create a Python environment
+
+The frozen experiment was run with Python 3.12 on native Windows.
+
+```bash
+python -m venv .venv
+```
+
+Git Bash on Windows:
+
+```bash
+source .venv/Scripts/activate
+```
+
+### 3. Install dependencies
+
+```bash
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+The exact environment used for the reported experiment is preserved in:
+
+```text
+experiment_manifests/reproducibility_2026-09-25/pip_freeze.txt
+```
+
+### 4. Configure Gemini
+
+Create a `.env` file in the repository root:
+
+```env
+GEMINI_API_KEY=your_api_key_here
+```
+
+Do not commit `.env` or your API key.
+
+---
+
+## Prepare InfiniteBench
+
+The preparation script downloads InfiniteBench through Hugging Face, groups questions by context, chunks each context into 512-token BGE-M3 chunks, and creates the EN.QA and EN.MC directory structure expected by the runner.
+
+```bash
+python scripts/prepare_infinitebench.py
+```
+
+Prepared data are stored under:
+
+```text
+dataset/infinitebench/enqa/
+dataset/infinitebench/enmc/
+```
+
+For EN.MC, each prepared example stores both:
+
+- `question`: question + A/B/C/D options for final answering,
+- `retrieval_question`: question without options for retrieval.
+
+---
+
+## Run the frozen experiment
+
+### EN.QA
+
+```bash
+python run_gemini_infinitebench.py --task enqa
+```
+
+### EN.MC
+
+```bash
+python run_gemini_infinitebench.py --task enmc
+```
+
+### Both tasks
+
+```bash
+python run_gemini_infinitebench.py --task all
+```
+
+By default, the runner uses:
+
+```text
+experiment_manifests/infinitebench_subset_seed0.json
+```
+
+Useful options:
+
+```bash
+--limit-contexts N   # pilot on the first N selected contexts
+--force              # rerun answers even if results already exist
+--rebuild-index      # ignore completion markers and rebuild/resume indexes
+--manifest PATH      # use a different subset manifest
+```
+
+For reproducing the reported scores, do **not** use `--force`, `--rebuild-index`, or a different manifest unless you intentionally want a new experiment.
+
+---
+
+## Evaluate
+
+### EN.QA
+
+The upstream ComoRAG QA evaluator computes normalized Exact Match and token-overlap F1.
+
+Example:
+
+```bash
+python script/eval_qa.py \
+  evaluation_inputs/enqa_subset \
+  --output evaluation_results/enqa_subset
+```
+
+### EN.MC
+
+```bash
+python scripts/evaluate_enmc_subset.py
+```
+
+This produces both:
+
+- official InfiniteBench-style MC accuracy,
+- strict explicit-choice accuracy and response-format diagnostics.
+
+---
+
+## Reproducibility records
+
+The repository preserves compact reproducibility records in:
+
+```text
+experiment_manifests/reproducibility_2026-09-25/
+```
+
+Important files include:
+
+```text
+experiment_config.txt
+final_scores.txt
+pip_freeze.txt
+python_version.txt
+torch_environment.txt
+windows_version.txt
+subset_manifest_sha256.txt
+final_results_sha256.txt
+final_evaluation_sha256.txt
+critical_code_sha256.txt
+```
+
+These records capture the experimental configuration, package environment, score summary, and hashes of the frozen inputs/outputs/code used for the reported run.
+
+---
+
+## Repository structure for this experiment
+
+```text
+ComoRAG/
+├── run_gemini_infinitebench.py
+├── main_gemini.py
+├── requirements.txt
+├── scripts/
+│   ├── prepare_infinitebench.py
+│   ├── select_infinitebench_subset.py
+│   ├── evaluate_enmc_subset.py
+│   ├── find_bad_enmc_stop_outputs.py
+│   ├── remove_bad_stop_cache.py
+│   ├── recover_enmc_stop_bug.py
+│   └── apply_enmc_stop_bug_recovery.py
+├── evaluation_results/
+│   ├── enqa_subset/evaluation_summary.json
+│   └── enmc_subset/evaluation_summary.json
+├── experiment_manifests/
+│   ├── infinitebench_subset_seed0.json
+│   ├── enmc_stop_bug_recovery.json
+│   └── reproducibility_2026-09-25/
+└── src/comorag/
+    ├── ComoRAG.py
+    ├── llm/openai_gpt.py
+    └── utils/
+```
+
+---
+
+## Important limitations
+
+- The Gemini experiment uses a **budget-constrained subset**, whereas the paper's reference results use the complete benchmark.
+- This is an **end-to-end model substitution**, not a controlled final-answer-only swap. Gemini participates in model-dependent indexing and reasoning stages.
+- Gemini API safety/content filters can affect intermediate summarization and final answering.
+- The reconstructed 6,000-token V:S:E:H allocation uses integer budgets of `3692:923:923:462` to approximate the paper's `8:2:2:1` ratio.
+- The Gemini OpenAI-compatible endpoint used here does not receive the configured seed parameter.
+- The implementation was developed and evaluated on native Windows; exact behavior may differ across operating systems, CUDA setups, package versions, or future Gemini API revisions.
+
+---
+
+## Original ComoRAG paper
+
+If you use this repository, please also cite the original ComoRAG work:
+
 ```bibtex
 @article{wang2025comorag,
   title={ComoRAG: A Cognitive-Inspired Memory-Organized RAG for Stateful Long Narrative Reasoning},
@@ -28,256 +422,13 @@ This is the **official implementation** of the paper:
 }
 ```
 
----
+Original project:
 
-## Project Introduction
-ComoRAG is a retrieval-augmented generation (RAG) framework designed for long-document and multi-document tasks, including question answering, information extraction, and knowledge graph construction. It integrates large language models, embedding techniques, graph-based reasoning, and evaluation methodologies, making it suitable for both academic research and real-world applications.
-
-🔥 What makes ComoRAG different?
-
-Narrative comprehension on long stories and novels is hard due to intricate plotlines and evolving character/entity relations. LLMs struggle with extended context and cost, so retrieval stays crucial. However, classic RAG is often stateless and single-step, missing the dynamic nature of long-range, interconnected reasoning.
-
-ComoRAG takes a cognition-inspired approach: narrative reasoning is not one-shot, but a dynamic, evolving interplay between new evidence acquisition and consolidation of past knowledge — analogous to memory processes in the brain. 🧠
-
-- 🔁 Iterative Reasoning Cycles: When hitting an impasse, ComoRAG launches cycles that interact with a dynamic memory workspace.
-- 🕵️ Probing Queries: Each cycle generates targeted probes to explore new evidence paths.
-- 🧳 Global Memory Pool: Newly retrieved evidence is integrated into a shared memory pool to progressively build coherent context for the query.
-
-🚀 Benchmarks & Gains: On four challenging long-context narrative benchmarks (200K+ tokens), ComoRAG outperforms strong RAG baselines with consistent relative gains up to 11% over the strongest baseline. It particularly shines on complex queries requiring global comprehension, enabling principled, cognitively motivated, stateful retrieval-based reasoning. 📈
-
-Key idea in one line: Reason → Probe → Retrieve → Consolidate → Resolve. 🧩
+- Paper: https://arxiv.org/abs/2508.10419
+- Official repository: https://github.com/EternityJune25/ComoRAG
 
 ---
 
-## Key Features ✨
-- 🧠 Support for various LLMs and local/remote embedding models
-- 🕸️ Graph-augmented retrieval and reasoning
-- 🔧 Flexible data preprocessing and chunking
-- 📊 Multiple evaluation metrics (F1, EM, etc.)
-- 🧱 Modular and extensible design
+## Acknowledgements
 
----
-
-## Directory Structure 📂
-```
-ComoRAG/
-├── main_openai.py                       # Main program using OpenAI API
-├── main_vllm.py                         # Main program using local vLLM server
-├── script/                              # Data processing and evaluation scripts
-│   ├── chunk_doc_corpus.py              # Document chunking script
-│   └── eval_qa.py                       # QA evaluation script
-├── dataset/                             # Dataset directory
-│   └── ...
-├── src/comorag/                        # Core code
-│   ├── ComoRAG.py                       # Main class and core logic
-│   ├── utils/                           # Utility modules
-│   ├── embedding_model/                 # Embedding model related
-│   ├── llm/                             # LLM related
-│   ├── prompts/                         # Prompt templates
-│   ├── information_extraction/          # Information extraction
-│   └── rerank.py, embedding_store.py    # Other core modules
-├── requirements.txt                     # Dependencies
-└── README.md                            # Project documentation
-```
-
----
-
-## Installation & Environment 🛠️
-1. 🐍 **Python version**: Python 3.10 or above recommended
-2. 📦 **Install dependencies**:
-```bash
-pip install -r requirements.txt
-```
-3. 🔑 **Environment variables**: Set your OpenAI API Key or local LLM/embedding paths as needed
-4. ⚙️ **GPU (optional but recommended)**: CUDA 12.x supported by many dependencies in requirements.txt
-
----
-
-## Data Preparation & Format 📄
-- 📚 **Corpus file corpus.jsonl**: Each line is a document, with fields like `id`, `doc_id`, `title`, `contents`
-- ❓ **QA file qas.jsonl**: Each line is a question, with fields like `id`, `question`, `golden_answers`
-
-Example:
-
-corpus.jsonl:
-```json
-{"id": 0, "doc_id": 1, "title": "...", "contents": "..."}
-```
-qas.jsonl:
-```json
-{"id": "1", "question": "...", "golden_answers": ["..."]}
-```
-
----
-
-## Quick Start ⚡
-
-### Method 1: Using OpenAI API (main_openai.py) 🚀
-
-1. Configure dataset path and model parameters in the script:
-```python
-config = BaseConfig(
-    llm_base_url='https://api.example.com/v1',  # OpenAI API
-    llm_name='gpt-4o-mini',
-    dataset='cinderella',
-    embedding_model_name='/path/to/your/embedding/model',
-    embedding_batch_size=32,
-    need_cluster=True,  # Enable Semantic/Episodic enhancement
-    output_dir='result/cinderella',
-    save_dir='outputs/cinderella',
-    max_meta_loop_max_iterations=5,
-    is_mc=False,  # Multiple-choice?
-    max_tokens_ver=2000,  # Veridical layer tokens
-    max_tokens_sem=2000,  # Semantic layer tokens
-    max_tokens_epi=2000   # Episodic layer tokens
-)
-```
-2. Run the main program ▶️:
-```bash
-python main_openai.py
-```
-
-### Method 2: Using Local vLLM Server (main_vllm.py) ⚡
-
-#### 1. Start vLLM Server 🚀
-
-First, start the vLLM OpenAI-compatible API server:
-
-```bash
-# Method 1: Using vllm serve command
-vllm serve /path/to/your/model \
-  --tensor-parallel-size 1 \
-  --max-model-len 4096 \
-  --gpu-memory-utilization 0.95
-
-# Method 2: Using python -m vllm.entrypoints.openai.api_server
-python -m vllm.entrypoints.openai.api_server \
-  --model /path/to/your/model \
-  --served-model-name your-model-name \
-  --tensor-parallel-size 1 \
-  --max-model-len 32768 \
-  --dtype auto
-```
-
-**Parameter descriptions:**
-- `--model`: Model path (e.g., `/path/to/your/model`)
-- `--tensor-parallel-size`: Number of GPU parallel processes
-- `--max-model-len`: Maximum model length
-- `--gpu-memory-utilization`: GPU memory utilization rate
-
-#### 2. Configure main_vllm.py 📝
-
-Modify the configuration in `main_vllm.py`:
-
-```python
-# vLLM server configuration
-vllm_base_url = 'http://localhost:8000/v1'  # vLLM server address
-served_model_name = '/path/to/your/model'    # Model path
-
-config = BaseConfig(
-    llm_base_url=vllm_base_url,
-    llm_name=served_model_name,
-    llm_api_key="your-api-key-here",  # Any value, local server doesn't need real API key
-    dataset='cinderella',
-    embedding_model_name='/path/to/your/embedding/model',
-    embedding_batch_size=4,
-    need_cluster=True,
-    output_dir='result/cinderella_vllm',
-    save_dir='outputs/cinderella_vllm',
-    max_meta_loop_max_iterations=5,
-    is_mc=False,
-    max_tokens_ver=2000,
-    max_tokens_sem=2000,
-    max_tokens_epi=2000
-)
-```
-
-#### 3. Run the Program ▶️
-
-```bash
-python main_vllm.py
-```
-
-#### 4. Check Server Status 🔍
-
-Ensure the vLLM server is running properly:
-
-```bash
-# Check if port is occupied
-netstat -tlnp | grep 8000
-
-# Test API connection
-curl http://localhost:8000/v1/models
-```
-
-### Comparison of Two Methods 📊
-
-| Feature | OpenAI API (main.py) | vLLM Local (main_vllm.py) |
-|---------|---------------------|---------------------------|
-| Cost | Pay per token | One-time model download |
-| Speed | Network latency | Local inference, faster |
-| Privacy | Data sent to cloud | Completely local processing |
-| Setup | Simple, just API key | Requires GPU and model files |
-| Stability | Network dependent | Local control |
-
-3. 📁 Results will be saved under `result/<dataset>/<subset>/`
-
----
-
-## Main Modules
-- 🏛️ `ComoRAG.py`: The main class, responsible for retrieval, graph construction, reasoning, and QA
-- 🧰 `utils/`: Configuration, logging, embedding, clustering, summarization, memory, agents, and other utilities
-- 🧲 `embedding_model/`: Embedding model adaptation and loading
-- 🤖 `llm/`: LLM adaptation
-- 🗒️ `prompts/`: Prompt template management
-- 📦 `embedding_store.py`: Embedding vector storage and retrieval
-
----
-
-## Data Processing & Evaluation Scripts 🧪
-- ✂️ `script/chunk_doc_corpus.py`: Document chunking, supports token/word/sentence/recursive methods
-- 📈 `script/eval_qa.py`: Automatic QA result evaluation, supports EM, F1, and other metrics
-
-Example usage:
-
-Chunking documents ✂️:
-```bash
-python script/chunk_doc_corpus.py \
-  --input_path dataset/<name>/<subset>/corpus.jsonl \
-  --output_path dataset/<name>/<subset>/corpus_chunked.jsonl \
-  --chunk_by token \
-  --chunk_size 512 \
-  --tokenizer_name_or_path /path/to/your/tokenizer
-```
-
-Evaluate QA results 📊:
-```bash
-python script/eval_qa.py /path/to/result/<dataset>/<subset>
-```
-This produces files like ``details`、`results.json`, etc.
-
----
-
-## Known Issues & TODO 📝
-
-### 🔧 Current Issues
-- [ ] **Remote Embedding Model Tokenizer Issue**: When using remote vLLM-deployed embedding models, fails due to missing local model files. Need to support local tokenizer for remote embedding models.
-
-### 🚀 Planned Features
-- [ ] Support for more embedding model providers (Azure OpenAI, etc.)
-
----
-
-## Contact & Contribution 🤝
-For questions or suggestions, feel free to submit an Issue or PR.
-
----
-
-## Acknowledgement 🙏
-We refer to the repository of [HippoRAG](https://github.com/OSU-NLP-Group/HippoRAG) as a skeleton code.
-
----
-
-## Star History ⭐
-
-[![Star History Chart](https://api.star-history.com/svg?repos=EternityJune25/ComoRAG&type=Date)](https://star-history.com/#EternityJune25/ComoRAG&Date)
+This work builds directly on the original ComoRAG implementation and its upstream dependencies. The purpose of this fork is to document a seminar replication/extension using Gemini 3.1 Flash-Lite and a reproducible InfiniteBench subset, not to replace or rebrand the original project.
