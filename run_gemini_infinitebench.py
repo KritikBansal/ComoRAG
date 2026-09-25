@@ -38,6 +38,11 @@ RESULT_ROOT = (
     / "infinitebench"
 )
 
+DEFAULT_SUBSET_MANIFEST = (
+    PROJECT_ROOT
+    / "experiment_manifests"
+    / "infinitebench_subset_seed0.json"
+)
 
 # ============================================================
 # MODEL / EXPERIMENT SETTINGS
@@ -68,17 +73,34 @@ def load_jsonl(path: Path):
 
 
 def save_json(path: Path, data):
-    """Write pretty-formatted JSON."""
+    """
+    Atomically write pretty-formatted JSON.
 
-    path.parent.mkdir(parents=True, exist_ok=True)
+    A crash while writing cannot leave behind a partial
+    results.json that looks complete.
+    """
 
-    with path.open("w", encoding="utf-8") as f:
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    temp_path = path.with_name(
+        path.name + ".tmp"
+    )
+
+    with temp_path.open(
+        "w",
+        encoding="utf-8"
+    ) as f:
         json.dump(
             data,
             f,
             ensure_ascii=False,
-            indent=2
+            indent=2,
         )
+
+    temp_path.replace(path)
 
 # ============================================================
 # INDEX COMPLETION / RESUME HELPERS
@@ -762,20 +784,88 @@ def process_context(
         results_file,
         result_list
     )
-
     print(
-        f"[DONE] Saved {len(result_list)} answers to:"
-    )
+            f"[DONE] Saved {len(result_list)} answers to:"
+        )
     print(results_file)
+    
+    
+def load_subset_manifest(path: Path):
+    """
+    Load and validate the frozen InfiniteBench subset manifest.
+    """
+
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Subset manifest not found: {path}"
+        )
+
+    with path.open("r", encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    if "selected_subset" not in manifest:
+        raise RuntimeError(
+            "Manifest is missing 'selected_subset'."
+        )
+
+    selected = manifest["selected_subset"]
+
+    required_keys = [
+        "selected_enqa_context_ids",
+        "selected_enmc_context_ids",
+        "enqa_questions",
+        "enmc_questions",
+    ]
+
+    for key in required_keys:
+        if key not in selected:
+            raise RuntimeError(
+                f"Manifest is missing selected_subset['{key}']"
+            )
+
+    return manifest
+
+
+def get_selected_context_ids(
+    manifest: dict,
+    task_name: str,
+):
+    """
+    Return the frozen list of context IDs for one task.
+    """
+
+    if task_name == "enqa":
+        key = "selected_enqa_context_ids"
+
+    elif task_name == "enmc":
+        key = "selected_enmc_context_ids"
+
+    else:
+        raise ValueError(
+            f"Unsupported task: {task_name}"
+        )
+
+    return list(
+        manifest[
+            "selected_subset"
+        ][key]
+    )
 
 
 # ============================================================
 # AGGREGATE RESULTS
 # ============================================================
 
-def aggregate_task_results(task_name: str):
+def aggregate_task_results(
+    task_name: str,
+    selected_context_ids,
+    expected_questions=None,
+):
     """
-    Combine the context-level results into one task-level file.
+    Combine ONLY results belonging to the frozen subset.
+
+    Results from contexts outside the subset are deliberately
+    ignored.
     """
 
     task_result_root = (
@@ -784,13 +874,21 @@ def aggregate_task_results(task_name: str):
     )
 
     all_results = []
+    missing_contexts = []
 
-    if not task_result_root.exists():
-        return
+    for context_id in selected_context_ids:
 
-    for results_file in sorted(
-        task_result_root.glob("*/results.json")
-    ):
+        results_file = (
+            task_result_root
+            / context_id
+            / "results.json"
+        )
+
+        if not results_file.exists():
+            missing_contexts.append(
+                context_id
+            )
+            continue
 
         with results_file.open(
             "r",
@@ -798,11 +896,15 @@ def aggregate_task_results(task_name: str):
         ) as f:
             context_results = json.load(f)
 
-        all_results.extend(context_results)
+        all_results.extend(
+            context_results
+        )
 
+    # Use a new name so we never confuse this with the
+    # old partial/full-dataset aggregate.
     aggregate_file = (
         task_result_root
-        / "results_all.json"
+        / "results_subset.json"
     )
 
     save_json(
@@ -813,12 +915,39 @@ def aggregate_task_results(task_name: str):
     print()
     print(
         f"[AGGREGATE] {task_name}: "
-        f"{len(all_results)} total answers"
+        f"{len(all_results)} subset answers"
     )
+
     print(
         f"[AGGREGATE] Saved to {aggregate_file}"
     )
 
+    if missing_contexts:
+
+        print()
+        print(
+            "[AGGREGATE] WARNING: "
+            f"{len(missing_contexts)} selected contexts "
+            "have no results.json:"
+        )
+
+        for context_id in missing_contexts:
+            print(
+                f"    {context_id}"
+            )
+
+    if (
+        expected_questions is not None
+        and not missing_contexts
+        and len(all_results) != expected_questions
+    ):
+        raise RuntimeError(
+            f"{task_name}: subset manifest expects "
+            f"{expected_questions} answers, but aggregate "
+            f"contains {len(all_results)}."
+        )
+
+    return all_results
 
 # ============================================================
 # RUN A TASK
@@ -828,9 +957,11 @@ def run_task(
     task_name: str,
     is_mc: bool,
     base_config: BaseConfig,
+    selected_context_ids,
+    expected_questions=None,
     limit_contexts=None,
     force=False,
-    rebuild_index=False
+    rebuild_index=False,
 ):
     """
     Run either EN.QA or EN.MC.
@@ -846,20 +977,51 @@ def run_task(
             f"Task directory does not exist: {task_dir}"
         )
 
-    context_dirs = sorted(
-        directory
+# --------------------------------------------------------
+# Restrict execution to the frozen subset manifest
+# --------------------------------------------------------
+
+    available_contexts = {
+        directory.name: directory
         for directory in task_dir.iterdir()
         if directory.is_dir()
-    )
+    }
 
+    missing_from_dataset = [
+        context_id
+        for context_id in selected_context_ids
+        if context_id not in available_contexts
+    ]
+
+    if missing_from_dataset:
+
+        raise RuntimeError(
+            f"{task_name}: manifest contains contexts "
+            f"that are missing from the prepared dataset:\n"
+            + "\n".join(missing_from_dataset)
+        )
+
+    context_dirs = [
+        available_contexts[context_id]
+        for context_id in selected_context_ids
+    ]
+
+    # --limit-contexts now means:
+    # "first N contexts FROM THE FROZEN SUBSET",
+    # not first N contexts from the full benchmark.
     if limit_contexts is not None:
-        context_dirs = context_dirs[:limit_contexts]
+        context_dirs = context_dirs[
+            :limit_contexts
+        ]
 
     print()
     print("#" * 70)
     print(f"Starting task: {task_name}")
     print(f"is_mc = {is_mc}")
-    print(f"Contexts found: {len(context_dirs)}")
+    print(
+    f"Selected subset contexts: "
+    f"{len(context_dirs)}"
+    )
     print("#" * 70)
 
     for number, context_dir in enumerate(
@@ -882,7 +1044,24 @@ def run_task(
             rebuild_index=rebuild_index
         )
 
-    aggregate_task_results(task_name)
+    actually_run_context_ids = [
+        context_dir.name
+        for context_dir in context_dirs
+    ]
+
+        # Do not enforce the full expected question count during
+        # an intentional --limit-contexts pilot.
+    validation_target = (
+        expected_questions
+        if limit_contexts is None
+        else None
+    )
+
+    aggregate_task_results(
+        task_name=task_name,
+        selected_context_ids=actually_run_context_ids,
+        expected_questions=validation_target,
+    )
 
 
 # ============================================================
@@ -905,6 +1084,17 @@ def main():
         help=(
             "Task to run. "
             "'all' runs EN.QA followed by EN.MC."
+        ),
+    )
+    
+    parser.add_argument(
+        "--manifest",
+        type=str,
+        default=str(DEFAULT_SUBSET_MANIFEST),
+        help=(
+            "Frozen InfiniteBench subset manifest. "
+            "Default: experiment_manifests/"
+            "infinitebench_subset_seed0.json"
         ),
     )
 
@@ -936,6 +1126,97 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # --------------------------------------------------------
+    # Load frozen subset manifest
+    # --------------------------------------------------------
+
+    manifest_path = Path(
+        args.manifest
+    )
+
+    if not manifest_path.is_absolute():
+        manifest_path = (
+            PROJECT_ROOT
+            / manifest_path
+        )
+
+    manifest = load_subset_manifest(
+    manifest_path
+    )
+
+    manifest_sha256 = sha256_file(
+        manifest_path
+    )
+
+    selected_enqa_ids = get_selected_context_ids(
+        manifest,
+        "enqa"
+    )
+
+    selected_enmc_ids = get_selected_context_ids(
+        manifest,
+       "enmc"
+    )
+    
+    expected_enqa_questions = (
+        manifest[
+            "selected_subset"
+        ]["enqa_questions"]
+    )
+
+    expected_enmc_questions = (
+        manifest[
+            "selected_subset"
+        ]["enmc_questions"]
+    )
+
+    print()
+    print("=" * 70)
+    print("FROZEN SUBSET MANIFEST")
+    print("=" * 70)
+
+    print(
+        f"Manifest:           {manifest_path}"
+    )
+
+    print(
+        f"Manifest SHA256:    {manifest_sha256}"
+    )
+
+    print(
+    f"EN.QA contexts:     {len(selected_enqa_ids)}"
+)
+
+    print(
+        f"EN.QA questions:    {expected_enqa_questions}"
+    )
+
+    print(
+        f"EN.MC contexts:     {len(selected_enmc_ids)}"
+    )
+
+    print(
+        f"EN.MC questions:    {expected_enmc_questions}"
+    )
+
+    budget = manifest.get(
+        "budget_projection",
+        {}
+    )
+
+    if budget:
+        print(
+            "Projected total:    "
+            f"€{budget.get('projected_total_with_reserve_eur', 'N/A')}"
+        )
+
+        print(
+            "Hard budget cap:    "
+            f"€{budget.get('hard_budget_cap_eur', 'N/A')}"
+        )
+
+    print("=" * 70)
 
     # --------------------------------------------------------
     # Load API key
@@ -996,9 +1277,24 @@ def main():
             task_name="enqa",
             is_mc=False,
             base_config=base_config,
-            limit_contexts=args.limit_contexts,
+
+            selected_context_ids=(
+                selected_enqa_ids
+            ),
+
+            expected_questions=(
+                expected_enqa_questions
+            ),
+
+            limit_contexts=(
+                args.limit_contexts
+            ),
+
             force=args.force,
-            rebuild_index=args.rebuild_index
+
+            rebuild_index=(
+                args.rebuild_index
+            )
         )
 
     # --------------------------------------------------------
@@ -1014,9 +1310,24 @@ def main():
             task_name="enmc",
             is_mc=True,
             base_config=base_config,
-            limit_contexts=args.limit_contexts,
+
+            selected_context_ids=(
+                selected_enmc_ids
+            ),
+
+            expected_questions=(
+                expected_enmc_questions
+            ),
+
+            limit_contexts=(
+            args.limit_contexts
+            ),
+
             force=args.force,
-            rebuild_index=args.rebuild_index
+
+            rebuild_index=(
+                args.rebuild_index
+            ),
         )
 
 

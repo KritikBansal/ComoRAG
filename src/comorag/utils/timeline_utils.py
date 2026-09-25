@@ -1,9 +1,13 @@
 import numpy as np
+import hashlib
 from typing import List, Dict, Any, Optional
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ..embedding_store import EmbeddingStore
-from .summarization_utils import BaseSummarizationModel
+from .summarization_utils import (
+    BaseSummarizationModel,
+    ProhibitedContentError,
+)
 import os
 import tiktoken
 import json
@@ -90,7 +94,6 @@ class TimelineSummarizer:
             }
         }
         
-        # 获取所有层级的总结
         level = 0
         while True:
             try:
@@ -240,22 +243,57 @@ Please provide a coherent summary that ensures:
         prompt = self._create_summary_prompt(texts, is_final_summary)
         return self.summarization_model.summarize(prompt)
     
-    def _process_window(self, window_texts: List[str], window_index: int, is_final_summary: bool = False) -> tuple[int, str]:
+    def _process_window(
+        self,
+        window_texts: List[str],
+        window_index: int,
+        is_final_summary: bool = False,
+    ) -> tuple[int, str]:
         """
-        Process text within a single window
-        
-        Args:
-            window_texts: List of texts within the window
-            window_index: Window index
-            is_final_summary: Whether this is the final summary
-            
-        Returns:
-            tuple[int, str]: (window index, summary text)
+        Process one chronological timeline window.
+
+        If Gemini blocks the window as PROHIBITED_CONTENT,
+        fall back deterministically to the original window text
+        instead of dropping the context or repeatedly retrying.
         """
-        if len(window_texts) > 1:
-            summary = self._summarize_window(window_texts, is_final_summary)
-            return window_index, summary
-        return window_index, window_texts[0]
+
+        if len(window_texts) == 1:
+            return (
+                window_index,
+                window_texts[0],
+            )
+
+        try:
+            summary = self._summarize_window(
+                window_texts,
+                is_final_summary,
+            )
+
+            return (
+                window_index,
+                summary,
+            )
+
+        except ProhibitedContentError as e:
+
+            logger.warning(
+                "Timeline window %s was blocked by Gemini "
+                "as PROHIBITED_CONTENT. "
+                "Using deterministic extractive fallback.",
+                window_index,
+            )
+
+            # Preserve chronological order and information.
+            #
+            # No additional LLM call is made here.
+            fallback = "\n\n".join(
+                window_texts
+            )
+
+            return (
+                window_index,
+                fallback,
+            )
     
     def _generate_final_summary(self, texts: List[str]) -> str:
         """
@@ -286,65 +324,420 @@ Please provide a coherent summary that ensures:
     
     def generate_timeline_summary(self) -> Dict[str, Any]:
         """
-        Generate timeline summary, only generate one level of summary
-        
-        Returns:
-            Dict[str, Any]: Dictionary containing summaries
+        Generate one level of chronological timeline summaries.
+
+        Individual successfully generated windows are checkpointed
+        so that a later API failure or process crash does not force
+        the entire timeline to be generated again.
         """
-        # Get all text chunks
+
+        # --------------------------------------------------------
+        # Load chunks
+        # --------------------------------------------------------
+
         all_ids = self.chunk_store.get_all_ids()
-        all_texts = [self.chunk_store.hash_id_to_text[id] for id in all_ids]
+
+        all_texts = [
+            self.chunk_store.hash_id_to_text[chunk_id]
+            for chunk_id in all_ids
+        ]
+
         total_chunks = len(all_texts)
-        
-        # Store summaries
-        summaries_by_level = []
-        window_tasks = []
-        
-        # Use fixed window size
+
         window_size = self.window_size
-        
-        # Prepare window tasks
-        for i in range(0, len(all_texts), window_size):
-            window_texts = all_texts[i:i + window_size]
-            window_tasks.append((window_texts, i // window_size))
-        
-        # Use thread pool to process windows in parallel
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            # Submit all tasks
-            future_to_window = {
-                executor.submit(self._process_window, texts, idx, True): (texts, idx)
-                for texts, idx in window_tasks
-            }
-            
-            # Collect results
-            window_results = []
-            for future in as_completed(future_to_window):
-                try:
-                    window_idx, summary = future.result()
-                    window_results.append((window_idx, summary))
-                except Exception as e:
-                    logger.error(f"Window processing failed: {e}")
-                    texts, idx = future_to_window[future]
-                    window_results.append((idx, texts[0] if len(texts) == 1 else ""))
-        
-        # Sort results by window index
-        window_results.sort(key=lambda x: x[0])
-        level_summaries = [summary for _, summary in window_results]
-        
-        summaries_by_level.append(level_summaries)
-        
-        # Store summaries
-        level_store = EmbeddingStore(
-            embedding_model=self.summary_store.embedding_model,
-            db_filename=os.path.dirname(self.summary_store.filename),
-            batch_size=self.summary_store.batch_size,
-            namespace="level_0"
+
+        # --------------------------------------------------------
+        # Build chronological windows
+        # --------------------------------------------------------
+
+        window_tasks = []
+
+        for i in range(
+            0,
+            len(all_texts),
+            window_size,
+        ):
+            window_texts = all_texts[
+                i:i + window_size
+            ]
+
+            window_index = (
+                i // window_size
+            )
+
+            window_tasks.append(
+                (
+                    window_texts,
+                    window_index,
+                )
+            )
+
+        total_windows = len(
+            window_tasks
         )
-        level_store.insert_strings(level_summaries)
-        
+
+        # --------------------------------------------------------
+        # Persistent per-window checkpoint
+        # --------------------------------------------------------
+
+        output_dir = os.path.dirname(
+            self.summary_store.filename
+        )
+
+        os.makedirs(
+            output_dir,
+            exist_ok=True,
+        )
+
+        cache_path = os.path.join(
+            output_dir,
+            "timeline_window_cache.json",
+        )
+
+        chunk_signature = hashlib.sha256(
+            "\n".join(
+                all_ids
+            ).encode("utf-8")
+        ).hexdigest()
+
+        summaries = {}
+
+        # --------------------------------------------------------
+        # Load an existing compatible checkpoint
+        # --------------------------------------------------------
+
+        if os.path.exists(
+            cache_path
+        ):
+            try:
+
+                with open(
+                    cache_path,
+                    "r",
+                    encoding="utf-8",
+                ) as f:
+
+                    cache_data = json.load(
+                        f
+                    )
+
+                cache_matches = (
+                    cache_data.get(
+                        "total_chunks"
+                    )
+                    == total_chunks
+
+                    and cache_data.get(
+                        "window_size"
+                    )
+                    == window_size
+
+                    and cache_data.get(
+                        "chunk_signature"
+                    )
+                    == chunk_signature
+                )
+
+                if cache_matches:
+
+                    cached_summaries = (
+                        cache_data.get(
+                            "summaries",
+                            {},
+                        )
+                    )
+
+                    for key, value in (
+                        cached_summaries.items()
+                    ):
+
+                        try:
+                            idx = int(key)
+
+                        except ValueError:
+                            continue
+
+                        if (
+                            0 <= idx < total_windows
+                            and isinstance(
+                                value,
+                                str,
+                            )
+                            and value.strip()
+                        ):
+                            summaries[
+                                str(idx)
+                            ] = value
+
+                    logger.info(
+                        "Loaded timeline checkpoint: "
+                        f"{len(summaries)}/"
+                        f"{total_windows} windows."
+                    )
+
+                else:
+
+                    logger.warning(
+                        "Existing timeline checkpoint does "
+                        "not match the current corpus/window "
+                        "configuration. Ignoring it."
+                    )
+
+            except Exception as e:
+
+                logger.warning(
+                    "Could not load timeline checkpoint: "
+                    f"{e}"
+                )
+
+        # --------------------------------------------------------
+        # Atomic checkpoint writer
+        # --------------------------------------------------------
+
+        def save_checkpoint():
+
+            cache_data = {
+                "total_chunks": total_chunks,
+                "window_size": window_size,
+                "chunk_signature": (
+                    chunk_signature
+                ),
+                "summaries": summaries,
+            }
+
+            temp_path = (
+                cache_path
+                + ".tmp"
+            )
+
+            with open(
+                temp_path,
+                "w",
+                encoding="utf-8",
+            ) as f:
+
+                json.dump(
+                    cache_data,
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+
+            os.replace(
+                temp_path,
+                cache_path,
+            )
+
+        # --------------------------------------------------------
+        # Only submit windows that are not already cached
+        # --------------------------------------------------------
+
+        pending_tasks = [
+            (
+                texts,
+                idx,
+            )
+            for texts, idx
+            in window_tasks
+            if str(idx)
+            not in summaries
+        ]
+
+        logger.info(
+            "Timeline generation: "
+            f"{len(summaries)}/"
+            f"{total_windows} windows cached, "
+            f"{len(pending_tasks)} remaining."
+        )
+
+        failures = []
+
+        completed_since_save = 0
+
+        # --------------------------------------------------------
+        # Generate missing windows
+        #
+        # IMPORTANT:
+        # Do not abort immediately when one window fails.
+        # Allow all other submitted windows to finish and save
+        # their successful outputs.
+        # --------------------------------------------------------
+
+        if pending_tasks:
+
+            with ThreadPoolExecutor(
+                max_workers=self.max_workers
+            ) as executor:
+
+                future_to_window = {
+                    executor.submit(
+                        self._process_window,
+                        texts,
+                        idx,
+                        True,
+                    ): (
+                        texts,
+                        idx,
+                    )
+
+                    for texts, idx
+                    in pending_tasks
+                }
+
+                for future in as_completed(
+                    future_to_window
+                ):
+
+                    texts, idx = (
+                        future_to_window[
+                            future
+                        ]
+                    )
+
+                    try:
+
+                        (
+                            window_idx,
+                            summary,
+                        ) = future.result()
+
+                        if not isinstance(
+                            summary,
+                            str,
+                        ):
+                            raise RuntimeError(
+                                "Timeline window "
+                                f"{window_idx} returned "
+                                "non-string summary."
+                            )
+
+                        if not summary.strip():
+                            raise RuntimeError(
+                                "Timeline window "
+                                f"{window_idx} returned "
+                                "an empty summary."
+                            )
+
+                        summaries[
+                            str(window_idx)
+                        ] = summary
+
+                        completed_since_save += 1
+
+                        # Save regularly so a hard crash loses
+                        # at most a few successful windows.
+                        if (
+                            completed_since_save
+                            >= 5
+                        ):
+                            save_checkpoint()
+
+                            completed_since_save = 0
+
+                    except Exception as e:
+
+                        logger.exception(
+                            "Timeline window %s "
+                            "processing failed.",
+                            idx,
+                        )
+
+                        failures.append(
+                            (
+                                idx,
+                                repr(e),
+                            )
+                        )
+
+            # Persist all successful results even when one or
+            # more windows failed.
+            save_checkpoint()
+
+        # --------------------------------------------------------
+        # Fail only AFTER successful windows were checkpointed
+        # --------------------------------------------------------
+
+        if failures:
+
+            failed_indices = [
+                idx
+                for idx, _
+                in failures
+            ]
+
+            raise RuntimeError(
+                "Timeline summary generation failed "
+                "for windows "
+                f"{failed_indices}. "
+                "All successful windows were checkpointed "
+                f"to {cache_path}"
+            )
+
+        # --------------------------------------------------------
+        # Reconstruct results in chronological order
+        # --------------------------------------------------------
+
+        missing_after_generation = [
+            idx
+            for idx
+            in range(total_windows)
+            if str(idx)
+            not in summaries
+        ]
+
+        if missing_after_generation:
+
+            raise RuntimeError(
+                "Timeline generation completed but "
+                "some windows are still missing: "
+                f"{missing_after_generation}"
+            )
+
+        level_summaries = [
+            summaries[
+                str(idx)
+            ]
+            for idx
+            in range(
+                total_windows
+            )
+        ]
+
+        summaries_by_level = [
+            level_summaries
+        ]
+
+        # --------------------------------------------------------
+        # Build the normal ComoRAG timeline embedding store
+        # --------------------------------------------------------
+
+        level_store = EmbeddingStore(
+            embedding_model=(
+                self.summary_store
+                .embedding_model
+            ),
+            db_filename=output_dir,
+            batch_size=(
+                self.summary_store
+                .batch_size
+            ),
+            namespace="level_0",
+        )
+
+        level_store.insert_strings(
+            level_summaries
+        )
+
+        logger.info(
+            "Timeline generation complete: "
+            f"{total_windows} windows."
+        )
+
         return {
             "total_levels": 1,
-            "summaries_by_level": summaries_by_level
+            "summaries_by_level": (
+                summaries_by_level
+            ),
         }
 
     def get_summary_by_level(self, level: int) -> List[str]:

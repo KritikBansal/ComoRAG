@@ -98,7 +98,8 @@ def retrieve_knn(query_ids: List[str], key_ids: List[str], query_vecs, key_vecs,
 
 def min_max_normalize(scores: np.ndarray) -> np.ndarray:
     """Normalize scores to [0,1] range"""
-    if len(scores) == 0:
+    scores = np.asarray(scores).reshape(-1)
+    if scores.size == 0:
         return scores
     min_score = np.min(scores)
     max_score = np.max(scores)
@@ -151,7 +152,7 @@ def get_similar_summaries(
     
     # Calculate similarity scores
     similarity_scores = np.dot(summary_embeddings, query_embedding.T)
-    similarity_scores = np.squeeze(similarity_scores) if similarity_scores.ndim == 2 else similarity_scores
+    similarity_scores = np.asarray(similarity_scores).reshape(-1)
     similarity_scores = min_max_normalize(similarity_scores)
     
     # Get top_k most similar summaries
